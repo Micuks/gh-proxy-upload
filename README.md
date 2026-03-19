@@ -4,7 +4,7 @@ Upload large files and folders to GitHub repositories through corporate proxies 
 
 ## Problem
 
-Corporate proxy servers (like Huawei HIS proxy) often truncate HTTP requests exceeding a size threshold (commonly 100KB). This prevents uploading files larger than ~75KB to GitHub via the API, since the GitHub Contents API requires base64 encoding (33% overhead) plus JSON wrapper.
+Corporate proxy servers often truncate HTTP requests exceeding a size threshold (commonly 100KB). This prevents uploading files larger than ~75KB to GitHub via the API, since the GitHub Contents API requires base64 encoding (33% overhead) plus JSON wrapper.
 
 ## How It Works
 
