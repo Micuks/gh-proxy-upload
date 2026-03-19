@@ -1,0 +1,141 @@
+name: Merge Proxy Upload Chunks
+
+on:
+  push:
+    paths:
+      - '.gh-proxy-upload/**/manifest.json'
+
+permissions:
+  contents: write
+
+jobs:
+  merge-chunks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+
+      - name: Find and process manifests
+        run: |
+          set -euo pipefail
+
+          ERRORS=0
+
+          for manifest in .gh-proxy-upload/*/manifest.json; do
+            [ -f "$manifest" ] || continue
+
+            session_dir="$(dirname "$manifest")"
+            session_id="$(basename "$session_dir")"
+
+            echo "============================================"
+            echo "Processing session: $session_id"
+            echo "============================================"
+
+            # Check status
+            status="$(jq -r '.status' "$manifest")"
+            if [ "$status" != "complete" ]; then
+              echo "SKIP: Session $session_id status is '$status', not 'complete'"
+              continue
+            fi
+
+            file_count="$(jq '.files | length' "$manifest")"
+            all_verified=true
+
+            for i in $(seq 0 $((file_count - 1))); do
+              target_path="$(jq -r ".files[$i].target_path" "$manifest")"
+              total_chunks="$(jq -r ".files[$i].total_chunks" "$manifest")"
+              expected_sha256="$(jq -r ".files[$i].sha256" "$manifest")"
+              original_size="$(jq -r ".files[$i].original_size" "$manifest")"
+              file_index="$(printf "%03d" "$i")"
+
+              echo ""
+              echo "  Reassembling: $target_path"
+              echo "    Expected size: $original_size bytes, $total_chunks chunks"
+
+              if [ "$total_chunks" -eq 0 ]; then
+                echo "    Empty file, creating empty target"
+                mkdir -p "$(dirname "$target_path")"
+                : > "$target_path"
+                continue
+              fi
+
+              # Ensure target directory exists
+              mkdir -p "$(dirname "$target_path")"
+
+              # Concatenate all chunks
+              : > "$target_path.tmp"
+              missing=false
+
+              for c in $(seq 0 $((total_chunks - 1))); do
+                chunk_idx="$(printf "%04d" "$c")"
+                chunk_path="${session_dir}/files/${file_index}/chunk_${chunk_idx}.chunk"
+
+                if [ ! -f "$chunk_path" ]; then
+                  echo "    ERROR: Missing chunk: $chunk_path"
+                  missing=true
+                  break
+                fi
+
+                cat "$chunk_path" >> "$target_path.tmp"
+              done
+
+              if [ "$missing" = true ]; then
+                all_verified=false
+                rm -f "$target_path.tmp"
+                continue
+              fi
+
+              # Verify SHA256
+              actual_sha256="$(sha256sum "$target_path.tmp" | cut -d' ' -f1)"
+              if [ "$actual_sha256" != "$expected_sha256" ]; then
+                echo "    ERROR: SHA256 mismatch!"
+                echo "      Expected: $expected_sha256"
+                echo "      Actual:   $actual_sha256"
+                all_verified=false
+                rm -f "$target_path.tmp"
+              else
+                # Verify size
+                actual_size="$(wc -c < "$target_path.tmp" | tr -d ' ')"
+                if [ "$actual_size" != "$original_size" ]; then
+                  echo "    ERROR: Size mismatch! Expected $original_size, got $actual_size"
+                  all_verified=false
+                  rm -f "$target_path.tmp"
+                else
+                  mv "$target_path.tmp" "$target_path"
+                  echo "    OK: Verified and placed at $target_path ($actual_size bytes)"
+                fi
+              fi
+            done
+
+            echo ""
+            if [ "$all_verified" = true ]; then
+              echo "  Session $session_id: All files verified. Cleaning up chunks..."
+              rm -rf "$session_dir"
+            else
+              echo "  Session $session_id: ERRORS detected. Chunks preserved for debugging."
+              ERRORS=$((ERRORS + 1))
+            fi
+          done
+
+          if [ "$ERRORS" -gt 0 ]; then
+            echo ""
+            echo "WARNING: $ERRORS session(s) had errors. Check logs above."
+          fi
+
+      - name: Commit merged files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "[gh-proxy-upload] Merged chunked uploads into target files
+
+            Automatically reassembled chunked files uploaded via gh-proxy-upload.
+            SHA256 verification passed for all files."
+            git push
+          fi

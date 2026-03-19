@@ -1,0 +1,10 @@
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test files
+/tmp/
+*.tmp
+
+# Upload state files (local)
+.gh-proxy-upload-state-*.json
